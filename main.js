@@ -2,8 +2,8 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const { WebhookClient } = require('discord.js');
 
-// Store known tokens
-let knownTokens = new Set();
+// Store known tokens with balances
+let knownTokens = new Map(); // Using Map to store token mint -> balance
 
 // Discord webhook configuration
 const DISCORD_WEBHOOK_URL = '';
@@ -48,36 +48,40 @@ async function getTokenBalances(walletAddress) {
             } catch (error) {
                 if (attempt === 3) throw error;
                 console.log(`Attempt ${attempt} failed, retrying...`);
-                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
+                await new Promise(resolve => setTimeout(resolve, 2000));
             }
         }
 
-        // Check each token
+        // Check each token for changes
         tokenAccounts.value.forEach((tokenAccount) => {
             const accountData = tokenAccount.account.data.parsed.info;
             const tokenBalance = accountData.tokenAmount.uiAmount;
             const tokenMint = accountData.mint;
 
-            if (!knownTokens.has(tokenMint) && tokenBalance > 0) {
-                console.log(`New token detected: ${tokenMint}`);
-                console.log(`Balance: ${tokenBalance}`);
-                sendDiscordNotification(tokenMint, tokenBalance, walletAddress);
-                knownTokens.add(tokenMint);
+            // Only process tokens with balance
+            if (tokenBalance > 0) {
+                // Only notify if this is a completely new token
+                if (!knownTokens.has(tokenMint)) {
+                    console.log(`New token detected: ${tokenMint}`);
+                    console.log(`Balance: ${tokenBalance}`);
+                    sendDiscordNotification(tokenMint, tokenBalance, walletAddress);
+                }
+                // Update the known balance regardless
+                knownTokens.set(tokenMint, tokenBalance);
             }
         });
 
     } catch (error) {
         console.error('Error in getTokenBalances:', error);
-        // If we hit an error, we'll try again in the next interval
     }
 }
 
 async function sendDiscordNotification(tokenMint, balance, walletAddress) {
     try {
         const message = {
-            content: '🚨 New Token Alert! 🚨',
+            content: '🚨 Token Update Alert! 🚨',
             embeds: [{
-                title: 'New Token Detected',
+                title: 'Token Update Detected',
                 color: 0x00ff00,
                 fields: [
                     {
@@ -117,38 +121,37 @@ async function startMonitoring() {
     
     console.log('Starting token monitoring...');
     
-    // Initial scan with retry logic
-    let retries = 3;
-    while (retries > 0) {
-        try {
-            const connection = await tryConnection();
-            const pubKey = new PublicKey(WALLET_ADDRESS);
-            const initialTokens = await connection.getParsedTokenAccountsByOwner(pubKey, {
-                programId: TOKEN_PROGRAM_ID,
-            });
+    try {
+        // Initial setup to record existing tokens
+        const connection = await tryConnection();
+        const pubKey = new PublicKey(WALLET_ADDRESS);
+        const initialTokens = await connection.getParsedTokenAccountsByOwner(pubKey, {
+            programId: TOKEN_PROGRAM_ID,
+        });
+        
+        // Record all initial tokens with balances
+        initialTokens.value.forEach((tokenAccount) => {
+            const accountData = tokenAccount.account.data.parsed.info;
+            const tokenBalance = accountData.tokenAmount.uiAmount;
+            const tokenMint = accountData.mint;
             
-            initialTokens.value.forEach((tokenAccount) => {
-                const tokenMint = tokenAccount.account.data.parsed.info.mint;
-                knownTokens.add(tokenMint);
-            });
-            
-            console.log(`Initial scan complete. Monitoring ${knownTokens.size} tokens...`);
-            break;
-        } catch (error) {
-            retries--;
-            if (retries === 0) {
-                console.error('Failed to complete initial scan after 3 attempts');
-                process.exit(1);
+            if (tokenBalance > 0) {
+                knownTokens.set(tokenMint, tokenBalance);
+                console.log(`Initial token recorded: ${tokenMint} (${tokenBalance})`);
             }
-            console.log(`Initial scan failed, retrying... (${retries} attempts remaining)`);
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
+        });
+        
+        console.log(`Initial setup complete. Monitoring for new tokens...`);
+        
+        // Continue monitoring every 60 seconds
+        setInterval(() => {
+            getTokenBalances(WALLET_ADDRESS);
+        }, 60000);
+        
+    } catch (error) {
+        console.error('Error starting monitoring:', error);
+        process.exit(1);
     }
-
-    // Check every 60 seconds
-    setInterval(() => {
-        getTokenBalances(WALLET_ADDRESS);
-    }, 60000);
 }
 
 startMonitoring().catch(console.error);
